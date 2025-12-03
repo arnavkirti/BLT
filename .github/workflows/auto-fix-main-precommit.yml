@@ -8,7 +8,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  issues: write  # Needed for labels
+  issues: write
 
 jobs:
   check-and-fix-main:
@@ -53,24 +53,6 @@ jobs:
             echo "fixes_needed=false" >> $GITHUB_OUTPUT
             echo "❌ Pre-commit failed but no auto-fixes available"
           fi
-
-      - name: Create or update labels
-        if: steps.check_fixes.outputs.fixes_needed == 'true'
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # Create automated-fix label if it doesn't exist
-          gh label create "automated-fix" \
-            --description "Automated fixes from CI/CD workflows" \
-            --color "0E8A16" \
-            --force || echo "Label 'automated-fix' already exists or cannot be created"
-          
-          # Create pre-commit label if it doesn't exist
-          gh label create "pre-commit" \
-            --description "Pre-commit hook related changes" \
-            --color "1D76DB" \
-            --force || echo "Label 'pre-commit' already exists or cannot be created"
 
       - name: Create fix branch and commit
         if: steps.check_fixes.outputs.fixes_needed == 'true'
@@ -117,6 +99,14 @@ jobs:
         run: |
           echo "🔄 Creating pull request..."
           
+          # Get list of changed files
+          CHANGED_FILES=$(git diff --name-only ${{ steps.create_branch.outputs.base_branch }}..${{ steps.create_branch.outputs.branch_name }} | head -20)
+          if [ $(git diff --name-only ${{ steps.create_branch.outputs.base_branch }}..${{ steps.create_branch.outputs.branch_name }} | wc -l) -gt 20 ]; then
+            CHANGED_FILES="${CHANGED_FILES}
+          ... and more files"
+          fi
+          
+          # Create PR without labels first (to avoid permission issues)
           PR_URL=$(gh pr create \
             --base "${{ steps.create_branch.outputs.base_branch }}" \
             --head "${{ steps.create_branch.outputs.branch_name }}" \
@@ -138,14 +128,16 @@ jobs:
 
           ### 📋 Files Changed:
           \`\`\`
-          $(git diff --name-only ${{ steps.create_branch.outputs.base_branch }}..${{ steps.create_branch.outputs.branch_name }})
+          ${CHANGED_FILES}
           \`\`\`
+
+          ### 🏷️ Labels
+          Please manually add these labels: \`automated-fix\`, \`pre-commit\`
 
           ---
           **⚠️ Please review these changes before merging.**
 
-          _This PR was automatically created by the auto-fix-main-precommit workflow._" \
-            --label "automated-fix,pre-commit")
+          _This PR was automatically created by the auto-fix-main-precommit workflow._")
           
           echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
           echo "✅ PR created successfully: $PR_URL"
@@ -157,6 +149,7 @@ jobs:
 
       - name: Comment on original commit
         if: steps.check_fixes.outputs.fixes_needed == 'true' && steps.create_pr.outputs.pr_url != ''
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -187,6 +180,8 @@ jobs:
           echo "- **PR URL**: ${{ steps.create_pr.outputs.pr_url }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "👉 **Next Steps**: Review and merge the PR to apply fixes" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "⚠️ **Note**: Labels need to be added manually due to GitHub token permissions" >> $GITHUB_STEP_SUMMARY
 
       - name: Notify on failure
         if: steps.precommit.outcome == 'failure' && steps.check_fixes.outputs.fixes_needed == 'false'
