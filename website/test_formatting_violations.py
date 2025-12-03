@@ -32,3 +32,7 @@ def trailing_whitespace_function():
     else:
         return 0
 
+
+# Another violation
+def more_bad_formatting(  x  ,  y  ):
+    return x+y
