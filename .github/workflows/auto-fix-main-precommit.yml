@@ -3,23 +3,24 @@ name: Auto-Fix Pre-Commit Issues on Main
 on:
   push:
     branches:
-      - main
       - test/*
 
 permissions:
   contents: write
   pull-requests: write
+  issues: write  # Needed for labels
 
 jobs:
   check-and-fix-main:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Checkout main branch
+      - name: Checkout branch
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
+          ref: ${{ github.ref }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -47,19 +48,43 @@ jobs:
         run: |
           if [ -n "$(git status --porcelain)" ]; then
             echo "fixes_needed=true" >> $GITHUB_OUTPUT
-            echo "Pre-commit made auto-fixes"
+            echo "✅ Pre-commit made auto-fixes"
           else
             echo "fixes_needed=false" >> $GITHUB_OUTPUT
-            echo "Pre-commit failed but no auto-fixes available"
+            echo "❌ Pre-commit failed but no auto-fixes available"
           fi
+
+      - name: Create or update labels
+        if: steps.check_fixes.outputs.fixes_needed == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Create automated-fix label if it doesn't exist
+          gh label create "automated-fix" \
+            --description "Automated fixes from CI/CD workflows" \
+            --color "0E8A16" \
+            --force || echo "Label 'automated-fix' already exists or cannot be created"
+          
+          # Create pre-commit label if it doesn't exist
+          gh label create "pre-commit" \
+            --description "Pre-commit hook related changes" \
+            --color "1D76DB" \
+            --force || echo "Label 'pre-commit' already exists or cannot be created"
 
       - name: Create fix branch and commit
         if: steps.check_fixes.outputs.fixes_needed == 'true'
         id: create_branch
         run: |
-          # Create unique branch name
-          BRANCH_NAME="fix/pre-commit-main-$(date +%Y%m%d-%H%M%S)"
+          # Get current branch name
+          CURRENT_BRANCH="${GITHUB_REF#refs/heads/}"
+          echo "📍 Current branch: $CURRENT_BRANCH"
+          
+          # Create unique branch name based on current branch
+          BRANCH_NAME="fix/pre-commit-${CURRENT_BRANCH//\//-}-$(date +%Y%m%d-%H%M%S)"
           echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+          echo "base_branch=$CURRENT_BRANCH" >> $GITHUB_OUTPUT
+          echo "🌿 New branch: $BRANCH_NAME"
           
           # Configure git
           git config user.name "github-actions[bot]"
@@ -70,7 +95,7 @@ jobs:
           
           # Commit changes
           git add .
-          git commit -m "🤖 Auto-fix: Apply pre-commit fixes to main
+          git commit -m "🤖 Auto-fix: Apply pre-commit fixes to $CURRENT_BRANCH
 
           This commit automatically applies formatting and linting fixes:
           - Black code formatting
@@ -82,39 +107,92 @@ jobs:
           
           # Push branch
           git push origin $BRANCH_NAME
+          echo "✅ Branch pushed successfully"
 
       - name: Create Pull Request
         if: steps.check_fixes.outputs.fixes_needed == 'true'
+        id: create_pr
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh pr create \
-            --base main \
-            --head ${{ steps.create_branch.outputs.branch_name }} \
-            --title "🤖 Auto-fix: Pre-commit fixes for main branch" \
-            --body "## Automated Pre-Commit Fixes
+          echo "🔄 Creating pull request..."
+          
+          PR_URL=$(gh pr create \
+            --base "${{ steps.create_branch.outputs.base_branch }}" \
+            --head "${{ steps.create_branch.outputs.branch_name }}" \
+            --title "🤖 Auto-fix: Pre-commit fixes for ${{ steps.create_branch.outputs.base_branch }}" \
+            --body "## 🤖 Automated Pre-Commit Fixes
 
-          This PR contains automatic formatting and linting fixes applied to the main branch.
+          This PR contains automatic formatting and linting fixes applied to the **\`${{ steps.create_branch.outputs.base_branch }}\`** branch.
 
-          ### Changes Applied:
+          ### 🔧 Changes Applied:
           - ✅ Black code formatting
           - ✅ isort import sorting  
           - ✅ ruff linting fixes
           - ✅ djLint template formatting
 
-          ### Commit that triggered this:
-          - SHA: ${{ github.sha }}
-          - Author: ${{ github.actor }}
-          - Message: ${{ github.event.head_commit.message }}
+          ### 📝 Commit that triggered this:
+          - **SHA**: \`${{ github.sha }}\`
+          - **Author**: @${{ github.actor }}
+          - **Message**: ${{ github.event.head_commit.message }}
 
-          **⚠️ Please review these changes before merging.**
+          ### 📋 Files Changed:
+          \`\`\`
+          $(git diff --name-only ${{ steps.create_branch.outputs.base_branch }}..${{ steps.create_branch.outputs.branch_name }})
+          \`\`\`
 
           ---
-          *This PR was automatically created by the auto-fix-main-precommit workflow.*" \
-            --label "automated-fix" \
-            --label "pre-commit"
+          **⚠️ Please review these changes before merging.**
+
+          _This PR was automatically created by the auto-fix-main-precommit workflow._" \
+            --label "automated-fix,pre-commit")
+          
+          echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
+          echo "✅ PR created successfully: $PR_URL"
+          
+          # Extract and save PR number
+          PR_NUMBER=$(echo "$PR_URL" | grep -o '[0-9]*$')
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          echo "📋 PR Number: #$PR_NUMBER"
+
+      - name: Comment on original commit
+        if: steps.check_fixes.outputs.fixes_needed == 'true' && steps.create_pr.outputs.pr_url != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            /repos/${{ github.repository }}/commits/${{ github.sha }}/comments \
+            -f body="🤖 **Auto-fix PR Created**
+
+          Pre-commit checks detected formatting issues that were automatically fixed.
+
+          👉 **Review the fixes here**: ${{ steps.create_pr.outputs.pr_url }}
+
+          Please review and merge the PR to apply the fixes to this branch." \
+            || echo "⚠️ Could not add comment to commit"
+
+      - name: Summary
+        if: steps.check_fixes.outputs.fixes_needed == 'true'
+        run: |
+          echo "## 🎉 Auto-fix Workflow Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ **Status**: Successfully created PR with auto-fixes" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📋 **Details**:" >> $GITHUB_STEP_SUMMARY
+          echo "- **Base Branch**: \`${{ steps.create_branch.outputs.base_branch }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Fix Branch**: \`${{ steps.create_branch.outputs.branch_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **PR Number**: #${{ steps.create_pr.outputs.pr_number }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **PR URL**: ${{ steps.create_pr.outputs.pr_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "👉 **Next Steps**: Review and merge the PR to apply fixes" >> $GITHUB_STEP_SUMMARY
 
       - name: Notify on failure
         if: steps.precommit.outcome == 'failure' && steps.check_fixes.outputs.fixes_needed == 'false'
         run: |
-          echo "::error::Pre-commit checks failed on main branch but no auto-fixes could be applied. Manual intervention required."
+          echo "## ❌ Pre-commit Failed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Pre-commit checks failed but no auto-fixes could be applied." >> $GITHUB_STEP_SUMMARY
+          echo "Manual intervention is required." >> $GITHUB_STEP_SUMMARY
+          echo "::error::Pre-commit checks failed but no auto-fixes could be applied. Manual intervention required."
