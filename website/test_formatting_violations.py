@@ -1,8 +1,12 @@
 # Intentional formatting violations for testing
 
-import sys,os,django
-from django.db import models
 import json
+import os
+import sys
+
+import django
+from django.db import models
+
 
 # Bad spacing around operators
 def badly_formatted_function(  x,y,z  ):
