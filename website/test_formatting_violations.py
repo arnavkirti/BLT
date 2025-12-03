@@ -45,3 +45,7 @@ def more_bad_formatting(  x  ,  y  ):
 class AnotherBadClass:
     def bad_method(self,x,y):
         return x+y
+
+# Final test violation
+def final_test(x,y):
+    return x+y
