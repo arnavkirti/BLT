@@ -40,3 +40,8 @@ def more_bad_formatting(  x  ,  y  ):
 # Another violation
 def more_bad_formatting(  x  ,  y  ):
     return x+y
+
+# More violations for testing PR creation
+class AnotherBadClass:
+    def bad_method(self,x,y):
+        return x+y
