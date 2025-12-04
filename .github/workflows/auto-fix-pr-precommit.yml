@@ -29,6 +29,7 @@ jobs:
           key: ${{ runner.os }}-pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
           restore-keys: |
             ${{ runner.os }}-pre-commit-
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -38,14 +39,17 @@ jobs:
         run: |
           curl -sSL https://install.python-poetry.org | python3 -
           echo "$HOME/.local/bin" >> $GITHUB_PATH
+
       - name: Install dependencies
         run: |
           poetry install --no-interaction
+
       - name: Run pre-commit checks
         id: precommit
         continue-on-error: true
         run: |
           poetry run pre-commit run --all-files
+
       - name: Check if fixes are needed
         id: check_fixes
         if: steps.precommit.outcome == 'failure'
@@ -57,6 +61,7 @@ jobs:
             echo "fixes_needed=false" >> $GITHUB_OUTPUT
             echo "❌ Pre-commit failed but no auto-fixes available"
           fi
+
       - name: Check if PR is from fork
         id: check_fork
         run: |
@@ -67,6 +72,7 @@ jobs:
             echo "is_fork=false" >> $GITHUB_OUTPUT
             echo "🏠 PR is from the same repository"
           fi
+
       - name: Commit and push fixes (same repo)
         if: steps.check_fixes.outputs.fixes_needed == 'true' && steps.check_fork.outputs.is_fork == 'false'
         run: |
@@ -75,6 +81,7 @@ jobs:
           
           git add .
           git commit -m "🤖 Auto-fix: Apply pre-commit fixes
+
           This commit automatically applies formatting and linting fixes:
           - Black code formatting
           - isort import sorting
@@ -85,47 +92,73 @@ jobs:
           
           git push origin ${{ github.event.pull_request.head.ref }}
           echo "✅ Fixes pushed to PR branch"
+
       - name: Comment on PR with fixes (same repo)
         if: steps.check_fixes.outputs.fixes_needed == 'true' && steps.check_fork.outputs.is_fork == 'false'
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh pr comment ${{ github.event.pull_request.number }} \
             --body "🤖 **Auto-fix Applied**
+
           Pre-commit checks detected formatting issues and automatically applied fixes.
+
           ✅ **Changes Applied:**
           - Black code formatting
           - isort import sorting
           - ruff linting fixes
           - djLint template formatting
-          The fixes have been committed directly to this PR branch."
-      - name: Comment on PR for fork
+
+          The fixes have been committed directly to this PR branch." \
+            || echo "⚠️ Could not add comment (this is expected in local testing)"
+
+      - name: Create patch file for fork
         if: steps.check_fixes.outputs.fixes_needed == 'true' && steps.check_fork.outputs.is_fork == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Get list of changed files
-          CHANGED_FILES=$(git diff --name-only HEAD)
+          CHANGED_FILES=$(git diff --name-only HEAD | head -20)
+          if [ $(git diff --name-only HEAD | wc -l) -gt 20 ]; then
+            CHANGED_FILES="${CHANGED_FILES}
+          ... and more files"
+          fi
+          
+          echo "CHANGED_FILES<<EOF" >> $GITHUB_ENV
+          echo "$CHANGED_FILES" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
           
           # Create diff patch
           git diff > fixes.patch
           
-          # Comment with instructions and patch
+          echo "✅ Patch file created"
+
+      - name: Comment on PR for fork
+        if: steps.check_fixes.outputs.fixes_needed == 'true' && steps.check_fork.outputs.is_fork == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
           gh pr comment ${{ github.event.pull_request.number }} \
             --body "🤖 **Pre-commit Fixes Available**
+
           Your PR has formatting issues that can be automatically fixed.
+
           Since this PR is from a fork, I cannot push fixes directly. Please apply the fixes manually:
+
           ### Option 1: Apply the patch
           \`\`\`bash
-          # Download the patch
-          curl -L https://github.com/${{ github.repository }}/runs/${{ github.run_id }}/artifacts/fixes.patch -o fixes.patch
+          # Download the patch artifact from the workflow run
+          gh run download ${{ github.run_id }} -n pre-commit-fixes-${{ github.event.pull_request.number }}
+
           # Apply the patch
           git apply fixes.patch
+
           # Commit and push
           git add .
           git commit -m \"Apply pre-commit fixes\"
           git push
           \`\`\`
+
           ### Option 2: Run pre-commit locally
           \`\`\`bash
           poetry run pre-commit run --all-files
@@ -133,17 +166,22 @@ jobs:
           git commit -m \"Apply pre-commit fixes\"
           git push
           \`\`\`
+
           ### Files that need fixing:
           \`\`\`
-          $CHANGED_FILES
+          ${{ env.CHANGED_FILES }}
           \`\`\`
-          ⚠️ **Please apply these fixes to pass CI checks.**"
+
+          ⚠️ **Please apply these fixes to pass CI checks.**" \
+            || echo "⚠️ Could not add comment (this is expected in local testing)"
+
       - name: Upload patch artifact (fork PRs)
         if: steps.check_fixes.outputs.fixes_needed == 'true' && steps.check_fork.outputs.is_fork == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: pre-commit-fixes-${{ github.event.pull_request.number }}
           path: fixes.patch
+          retention-days: 7
 
       - name: Fail if fixes needed but not applied (fork)
         if: steps.check_fixes.outputs.fixes_needed == 'true' && steps.check_fork.outputs.is_fork == 'true'
@@ -152,14 +190,33 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "This PR has pre-commit issues. Since it's from a fork, fixes must be applied manually." >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📦 **Patch file available**: Download the \`pre-commit-fixes-${{ github.event.pull_request.number }}\` artifact" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Files that need fixing:**" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "${{ env.CHANGED_FILES }}" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
           echo "Please check the PR comment for instructions." >> $GITHUB_STEP_SUMMARY
           exit 1
+
       - name: Success summary (same repo)
         if: steps.check_fixes.outputs.fixes_needed == 'true' && steps.check_fork.outputs.is_fork == 'false'
         run: |
           echo "## ✅ Auto-fix Applied Successfully" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Pre-commit fixes have been automatically applied to this PR." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Changes committed:**" >> $GITHUB_STEP_SUMMARY
+          git log -1 --pretty=format:"- %s (%h)" >> $GITHUB_STEP_SUMMARY
+
+      - name: Success summary (no fixes needed)
+        if: steps.precommit.outcome == 'success'
+        run: |
+          echo "## ✅ Pre-commit Checks Passed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "All pre-commit checks passed successfully. No fixes needed!" >> $GITHUB_STEP_SUMMARY
+
       - name: Notify on failure
         if: steps.precommit.outcome == 'failure' && steps.check_fixes.outputs.fixes_needed == 'false'
         run: |
@@ -167,5 +224,11 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Pre-commit checks failed but no auto-fixes could be applied." >> $GITHUB_STEP_SUMMARY
           echo "Manual intervention is required." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Common issues:**" >> $GITHUB_STEP_SUMMARY
+          echo "- Syntax errors in Python code" >> $GITHUB_STEP_SUMMARY
+          echo "- Invalid Django template syntax" >> $GITHUB_STEP_SUMMARY
+          echo "- Missing required imports" >> $GITHUB_STEP_SUMMARY
+          echo "- Test failures" >> $GITHUB_STEP_SUMMARY
           echo "::error::Pre-commit checks failed but no auto-fixes could be applied. Manual intervention required."
           exit 1
